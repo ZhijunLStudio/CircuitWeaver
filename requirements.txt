@@ -1,0 +1,45 @@
+# --- Core Application Dependencies ---
+
+# For creating agentic workflows
+smolagents[docker]
+
+# The core library for circuit drawing
+schemdraw
+
+# OpenAI client for interacting with LLM APIs
+openai
+
+# For handling language model interactions and RAG components
+langchain
+langchain-core  # Often a good idea to explicitly include the core package
+langchain-community
+langchain-huggingface
+langchain-text-splitters 
+
+# For creating the vector database
+# faiss-cpu is the CPU version, it's universally compatible.
+# For GPU support, see the GPU section below.
+faiss-cpu
+
+# The embedding model library
+sentence-transformers
+unstructured[md]
+
+# For progress bars during data loading
+tqdm
+
+langchain_openai
+# --- Optional GPU Support ---
+# To enable GPU acceleration for embeddings, you need to install the correct
+# version of PyTorch that matches your system's CUDA version.
+# DO NOT uncomment the line below directly. Instead, go to https://pytorch.org/get-started/locally/
+# and find the correct command for your specific CUDA version.
+
+# Example for CUDA 12.1 (replace with the command from the PyTorch website):
+# torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# If you have a GPU and have installed the correct PyTorch version,
+# also install the GPU version of FAISS for faster searching.
+# The faiss-gpu package can be complex to install. Start with faiss-cpu
+# and only upgrade if performance is critical.
+# faiss-gpu

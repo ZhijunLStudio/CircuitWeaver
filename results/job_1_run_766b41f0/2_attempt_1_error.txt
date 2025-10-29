@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/home/lizhijun/llm/CircuitAgentOrchestrator/src/sandbox/local_sandbox.py", line 30, in _sandbox_target
+    spec.loader.exec_module(ai_module)
+  File "<frozen importlib._bootstrap_external>", line 995, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/lizhijun/llm/CircuitAgentOrchestrator/results/job_1_run_766b41f0/ai_generated_module_b5e58287fc9940079f3deb70c15a44ac.py", line 4, in <module>
+    from schemdraw import opamp
+ImportError: cannot import name 'opamp' from 'schemdraw' (/home/lizhijun/anaconda3/envs/llm/lib/python3.12/site-packages/schemdraw/__init__.py)

@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# Secrets / Configs (假设你的密钥在一个叫 config.py 的文件里)
+configs/models.py
+.env
+corpus/
+
+# IDE / OS files
+.vscode/
+.idea/
+*.DS_Store
