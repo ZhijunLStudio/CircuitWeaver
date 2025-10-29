@@ -6,6 +6,8 @@ __pycache__/
 configs/models.py
 .env
 corpus/
+results/
+knowledge_base/
 
 # IDE / OS files
 .vscode/

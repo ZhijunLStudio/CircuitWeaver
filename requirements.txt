@@ -1,45 +1,32 @@
-# --- Core Application Dependencies ---
-
-# For creating agentic workflows
-smolagents[docker]
-
-# The core library for circuit drawing
-schemdraw
-
-# OpenAI client for interacting with LLM APIs
-openai
-
-# For handling language model interactions and RAG components
+# --- Core LLM and Agent Framework ---
 langchain
-langchain-core  # Often a good idea to explicitly include the core package
+langchain-core
+langchain-openai
 langchain-community
 langchain-huggingface
-langchain-text-splitters 
+langchain-text-splitters
+openai
 
-# For creating the vector database
-# faiss-cpu is the CPU version, it's universally compatible.
-# For GPU support, see the GPU section below.
+# --- Circuit Drawing and Analysis ---
+schemdraw
+# Note: schemdraw depends on matplotlib, which will be installed automatically.
+
+# --- Vector Database and Embeddings ---
+# For creating the local vector store. faiss-cpu is recommended for broad compatibility.
+# If you have a CUDA-enabled GPU and want faster performance, you can use 'faiss-gpu'
+# but ensure you have the CUDA toolkit installed correctly.
 faiss-cpu
 
-# The embedding model library
+# For loading and using the embedding model from Hugging Face
 sentence-transformers
-unstructured[md]
+# PyTorch is a dependency for sentence-transformers.
+# It's recommended to install the correct version for your system (CPU/CUDA) separately
+# by following the instructions on the official PyTorch website: https://pytorch.org/
+torch
+# If using CUDA, ensure your torch installation matches your CUDA version.
 
+# --- Data Handling and Utilities ---
+# For loading markdown documents
+unstructured[md]
 # For progress bars during data loading
 tqdm
-
-langchain_openai
-# --- Optional GPU Support ---
-# To enable GPU acceleration for embeddings, you need to install the correct
-# version of PyTorch that matches your system's CUDA version.
-# DO NOT uncomment the line below directly. Instead, go to https://pytorch.org/get-started/locally/
-# and find the correct command for your specific CUDA version.
-
-# Example for CUDA 12.1 (replace with the command from the PyTorch website):
-# torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-
-# If you have a GPU and have installed the correct PyTorch version,
-# also install the GPU version of FAISS for faster searching.
-# The faiss-gpu package can be complex to install. Start with faiss-cpu
-# and only upgrade if performance is critical.
-# faiss-gpu

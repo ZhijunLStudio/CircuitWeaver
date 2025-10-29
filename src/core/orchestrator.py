@@ -1,4 +1,5 @@
 # src/core/orchestrator.py
+# ... (imports and __init__ and run methods are unchanged) ...
 import os
 import uuid
 import re
@@ -86,102 +87,114 @@ class CircuitWeaverOrchestrator:
             print(f"\n--- [Job {self.job_id}] Orchestration Complete ---")
             print(f"All artifacts for Job {self.job_id} saved in: {self.results_dir}")
 
+
     def _generate_circuit_idea(self) -> str:
         return self.planner_llm.invoke([HumanMessage(content=planner_prompts.GET_IDEA_PROMPT)]).content
-        
-    # --- KEY CHANGE: Refactored _generate_and_debug_code for Stateful Memory ---
+
     def _generate_and_debug_code(self, circuit_idea: str) -> str | None:
-        # 1. Initialize conversation history
         initial_prompt = coder_prompts.CODEGEN_PROMPT.format(
             circuit_idea=circuit_idea, 
             few_shot_examples=few_shot_library.EXAMPLE_1_HYBRID_SYSTEM
         )
         conversation_history = [HumanMessage(content=initial_prompt)]
         
-        # 2. Get the first code generation
         print(f"\n[Job {self.job_id}] " + "="*15 + f" Attempt #1/{settings.MAX_DEBUG_ATTEMPTS} (Initial Code Gen) " + "="*15)
         response = self.fixer_llms[0].invoke(conversation_history)
         current_code = self._extract_python_code(response.content)
-        conversation_history.append(response) # Add AI's first attempt to history
+        conversation_history.append(response)
 
+        # <<< KEY CHANGE: Simplified Loop and State Management >>>
         for i in range(settings.MAX_DEBUG_ATTEMPTS):
             attempt_num = i + 1
-            if i > 0: # Only print attempt number for debug loops
+            if i > 0:
                 print(f"\n[Job {self.job_id}] " + "="*15 + f" Debug Attempt #{attempt_num}/{settings.MAX_DEBUG_ATTEMPTS} " + "="*15)
 
-            # 3. Validate the current code
+            # 1. Validate the current code
             if not current_code:
-                last_error = "AI failed to generate any Python code."
-                failed_code = ""
+                last_error = "AI failed to generate any Python code in the previous step."
+                code_to_debug = "" # Nothing to debug
             else:
                 self._save_artifact(f"2_attempt_{attempt_num}_code.py", current_code)
                 success, output = self.sandbox.run(current_code, self.results_dir)
                 if success:
                     print(f"🟢 [Job {self.job_id}] Code executed successfully on attempt #{attempt_num}!")
-                    # If this was a fix, the successful code is `current_code`, and the failed code was from the previous loop.
-                    # We need to find the previously failed code to log the solution.
+                    # Asynchronous learning logic
                     if i > 0:
-                        # Find the last HumanMessage which contains the debug prompt and failed code
                         last_debug_prompt = next((msg for msg in reversed(conversation_history) if isinstance(msg, HumanMessage) and "FAILED CODE" in msg.content), None)
                         if last_debug_prompt:
-                           match = re.search(r"FAILED CODE:\s*```python\n(.*?)\n```", last_debug_prompt.content, re.DOTALL)
+                           match = re.search(r"LAST FAILED CODE THAT I AM DEBUGGING:\s*```python\n(.*?)\n```", last_debug_prompt.content, re.DOTALL)
                            if match:
                                prev_failed_code = match.group(1).strip()
-                               prev_error = re.search(r"ERROR MESSAGE \(Traceback\):\s*```\n(.*?)\n```", last_debug_prompt.content, re.DOTALL).group(1).strip()
-                               self.async_pool.submit(
-                                   self.solution_miner.mine_and_save_solution,
-                                   prev_failed_code, prev_error, current_code
-                               )
+                               prev_error_match = re.search(r"RESULTING ERROR MESSAGE:\s*```\n(.*?)\n```", last_debug_prompt.content, re.DOTALL)
+                               if prev_error_match:
+                                   prev_error = prev_error_match.group(1).strip()
+                                   self.async_pool.submit(self.solution_miner.mine_and_save_solution, prev_failed_code, prev_error, current_code)
                     return current_code
                 
                 last_error = output
-                failed_code = current_code
-                print(f"🔴 [Job {self.job_id}] Code failed. Error:\n{last_error}")
+                code_to_debug = current_code
+                print(f"🔴 [Job {self.job_id}] Code for Attempt #{attempt_num} failed. Error:\n{last_error}")
                 self._save_artifact(f"2_attempt_{attempt_num}_error.txt", last_error)
 
-            # 4. Prepare and execute the fix request
-            # This is where the stateful memory is built
-            core_error = last_error.strip().split('\n')[-1]
-            rag_context = self.rag_tool.forward(query=core_error)
-            kb_context = self.kb_manager.get_relevant_solutions(core_error)
+            # 2. Prepare for the fix
+            rag_context = self.rag_tool.forward(query=last_error.strip().split('\n')[-1])
+            kb_context = self.kb_manager.get_relevant_solutions(last_error)
             full_context = f"{rag_context}\n\n{kb_context}".strip()
             
-            # Create the debug prompt for this turn
-            debug_prompt = debugger_prompts.get_debug_prompt(failed_code, last_error, full_context)
-            
-            # *** CRITICAL MEMORY STEP ***
-            # Add the user's debug request to the history for the NEXT turn to see
+            debug_prompt = debugger_prompts.get_debug_prompt(code_to_debug, last_error, full_context)
             conversation_history.append(HumanMessage(content=debug_prompt))
 
-            # 5. Race models for a fix
+            # 3. Race models and collect all results
             fix_responses = self._race_models_for_fix(conversation_history)
             
-            if fix_responses:
-                # Find the first valid code from the responses
-                for model_idx, response_content in fix_responses.items():
-                    validated_code = self._validate_fix(response_content, model_idx)
-                    if validated_code:
-                        print(f"🏆 [Job {self.job_id}] Model #{model_idx} found a valid fix!")
-                        # *** CRITICAL MEMORY STEP ***
-                        # Add the SUCCESSFUL model's response to history
-                        conversation_history.append(AIMessage(content=response_content))
-                        current_code = validated_code
-                        # Break the inner loop and proceed to the next validation loop (for loop)
-                        break 
-                else: # This 'else' belongs to the 'for', executed if no break
-                    print(f"🟡 [Job {self.job_id}] All model responses failed validation in this attempt.")
-                    # *** CRITICAL MEMORY STEP ***
-                    # Add a summary of the failure to the history so the AI knows its previous attempt was fruitless
-                    failure_summary = f"ATTEMPT {attempt_num} FAILED. All models ({', '.join(map(str, fix_responses.keys()))}) provided code that did not pass validation. The error was still: {core_error}. I must try a completely different approach."
-                    conversation_history.append(AIMessage(content=failure_summary))
-                    # current_code remains the last failed code
-            else:
-                 print(f"🟡 [Job {self.job_id}] All models failed to generate any response in this attempt.")
-                 conversation_history.append(AIMessage(content=f"ATTEMPT {attempt_num} FAILED. All models failed to generate a response."))
-        
-        return None # All attempts failed
+            # 4. Process results: find a winner or aggregate failures
+            validated_results = []
+            successful_fix = None
+            for model_idx, response_content in fix_responses.items():
+                is_valid, result_or_error, code_snippet = self._validate_fix(response_content, model_idx, attempt_num)
+                if is_valid:
+                    successful_fix = {"response": response_content, "code": result_or_error, "model_idx": model_idx}
+                    break
+                else:
+                    validated_results.append({
+                        "model_idx": model_idx, "code": code_snippet, "error": result_or_error
+                    })
 
-    # --- KEY CHANGE: race_models_for_fix now returns ALL responses, validation happens outside ---
+            # 5. Update state for the next loop
+            if successful_fix:
+                print(f"🏆 [Job {self.job_id}] Model #{successful_fix['model_idx']} found a valid fix!")
+                current_code = successful_fix['code']
+                conversation_history.append(AIMessage(content=successful_fix['response']))
+            else:
+                print(f"🟡 [Job {self.job_id}] All models failed to provide a working fix in this attempt.")
+                failure_summary = self._create_failure_summary(attempt_num, validated_results)
+                conversation_history.append(AIMessage(content=failure_summary))
+                
+                # *** CRITICAL BUG FIX ***
+                # Set the next code to debug to the first model's failed attempt. This ensures the loop moves forward.
+                if validated_results:
+                    current_code = validated_results[0]['code']
+                else:
+                    # If no models even returned code, we are stuck. Keep the old code.
+                    current_code = code_to_debug 
+        
+        return None
+
+    def _create_failure_summary(self, attempt_num: int, results: list) -> str:
+        """Builds a detailed summary of all failed attempts for the conversation history."""
+        if not results:
+            return f"ATTEMPT {attempt_num} FAILED. No models produced any code to validate."
+        
+        summary = f"ATTEMPT {attempt_num} FAILED. All model solutions were invalid. I must learn from all their mistakes and try a new approach.\n\n"
+        summary += "--- ANALYSIS OF FAILED ATTEMPTS ---\n"
+        for res in results:
+            model_name = models.MODELS_FOR_FIXING[res['model_idx']]
+            summary += f"\n[Model #{res['model_idx']} ({model_name}) Attempt]:\n"
+            summary += f"- Error Produced:\n```\n{res['error']}\n```\n"
+            # No need to include the code again as it's saved as an artifact
+        summary += "--- END OF ANALYSIS ---\n"
+        return summary
+
     def _race_models_for_fix(self, history: list) -> dict:
         print(f"[Job {self.job_id}] Preparing to race models...")
         responses = {}
@@ -202,33 +215,43 @@ class CircuitWeaverOrchestrator:
         return responses
 
     def _get_model_response(self, llm: ChatOpenAI, history: list, model_idx: int) -> str | None:
-        print(f"   [Job {self.job_id}] Model #{model_idx} starting generation...")
+        model_name = models.MODELS_FOR_FIXING[model_idx]
+        print(f"   [Job {self.job_id}] Model #{model_idx} ({model_name}) starting generation...")
         try:
             response = llm.invoke(history)
             return response.content
         except APITimeoutError:
-            print(f"   [Job {self.job_id}] Model #{model_idx} timed out.")
+            print(f"   [Job {self.job_id}] Model #{model_idx} ({model_name}) timed out.")
         except Exception:
-            # Other exceptions are already logged in the race_models_for_fix
             pass
         return None
 
-    def _validate_fix(self, response_content: str, model_idx: int) -> str | None:
+    # <<< KEY CHANGE: _validate_fix now returns a tuple (bool, str, str) and saves artifacts >>>
+    def _validate_fix(self, response_content: str, model_idx: int, attempt_num: int) -> tuple[bool, str, str]:
         code = self._extract_python_code(response_content)
-        if not code:
-            print(f"   [Job {self.job_id}] Model #{model_idx} did not return code.")
-            return None
+        model_name = models.MODELS_FOR_FIXING[model_idx]
         
-        print(f"   [Job {self.job_id}] Validating code from Model #{model_idx}...")
-        success, _ = self.sandbox.run(code, self.results_dir)
-        if success:
-            print(f"   ✅ [Job {self.job_id}] Code from Model #{model_idx} is VALID.")
-            return code
-        else:
-            print(f"   ❌ [Job {self.job_id}] Code from Model #{model_idx} FAILED validation.")
-            return None
+        if not code:
+            error_msg = "Model did not return a valid Python code block."
+            print(f"   ❌ [Job {self.job_id}] Code from Model #{model_idx} ({model_name}) FAILED: {error_msg}")
+            return False, error_msg, ""
 
-    # Unchanged helper methods below
+        print(f"   [Job {self.job_id}] Validating code from Model #{model_idx} ({model_name})...")
+        success, output = self.sandbox.run(code, self.results_dir)
+        
+        # Save every model's attempt for full transparency
+        model_filename_prefix = f"3_attempt_{attempt_num}_model_{model_idx}_{model_name.replace('/', '_')}"
+        self._save_artifact(f"{model_filename_prefix}_code.py", code)
+
+        if success:
+            print(f"   ✅ [Job {self.job_id}] Code from Model #{model_idx} ({model_name}) is VALID.")
+            return True, code, code
+        else:
+            print(f"   ❌ [Job {self.job_id}] Code from Model #{model_idx} ({model_name}) FAILED validation.")
+            self._save_artifact(f"{model_filename_prefix}_error.txt", output)
+            return False, output, code
+
+    # ... (rest of the file is unchanged) ...
     def _extract_python_code(self, content: str) -> str:
         match = re.search(r"```python\n(.*?)\n```", content, re.DOTALL)
         if match:
