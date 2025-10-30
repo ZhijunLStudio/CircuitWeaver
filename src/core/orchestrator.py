@@ -1,5 +1,3 @@
-# src/core/orchestrator.py
-# ... (imports and __init__ and run methods are unchanged) ...
 import os
 import uuid
 import re
@@ -75,7 +73,7 @@ class CircuitWeaverOrchestrator:
                 return
 
             self._save_artifact("4_final_successful_code.py", final_code)
-            print(f"\n✅ [Job {self.job_id}] Agent successfully generated a working script.")
+            print(f"✅ [Job {self.job_id}] Agent successfully generated a working script.")
             
             print(f"\n[Job {self.job_id}] --- STAGE 4: Injecting metadata and generating final assets ---")
             self._finalize_and_run(final_code)
@@ -86,7 +84,6 @@ class CircuitWeaverOrchestrator:
         finally:
             print(f"\n--- [Job {self.job_id}] Orchestration Complete ---")
             print(f"All artifacts for Job {self.job_id} saved in: {self.results_dir}")
-
 
     def _generate_circuit_idea(self) -> str:
         return self.planner_llm.invoke([HumanMessage(content=planner_prompts.GET_IDEA_PROMPT)]).content
@@ -103,32 +100,32 @@ class CircuitWeaverOrchestrator:
         current_code = self._extract_python_code(response.content)
         conversation_history.append(response)
 
-        # <<< KEY CHANGE: Simplified Loop and State Management >>>
+        # <<< KEY CHANGE: Initialize failure chain tracker >>>
+        current_failure_chain = []
+
         for i in range(settings.MAX_DEBUG_ATTEMPTS):
             attempt_num = i + 1
             if i > 0:
                 print(f"\n[Job {self.job_id}] " + "="*15 + f" Debug Attempt #{attempt_num}/{settings.MAX_DEBUG_ATTEMPTS} " + "="*15)
 
-            # 1. Validate the current code
             if not current_code:
                 last_error = "AI failed to generate any Python code in the previous step."
-                code_to_debug = "" # Nothing to debug
+                code_to_debug = ""
             else:
                 self._save_artifact(f"2_attempt_{attempt_num}_code.py", current_code)
                 success, output = self.sandbox.run(current_code, self.results_dir)
                 if success:
                     print(f"🟢 [Job {self.job_id}] Code executed successfully on attempt #{attempt_num}!")
-                    # Asynchronous learning logic
-                    if i > 0:
-                        last_debug_prompt = next((msg for msg in reversed(conversation_history) if isinstance(msg, HumanMessage) and "FAILED CODE" in msg.content), None)
-                        if last_debug_prompt:
-                           match = re.search(r"LAST FAILED CODE THAT I AM DEBUGGING:\s*```python\n(.*?)\n```", last_debug_prompt.content, re.DOTALL)
-                           if match:
-                               prev_failed_code = match.group(1).strip()
-                               prev_error_match = re.search(r"RESULTING ERROR MESSAGE:\s*```\n(.*?)\n```", last_debug_prompt.content, re.DOTALL)
-                               if prev_error_match:
-                                   prev_error = prev_error_match.group(1).strip()
-                                   self.async_pool.submit(self.solution_miner.mine_and_save_solution, prev_failed_code, prev_error, current_code)
+                    
+                    # <<< KEY CHANGE: Trigger multi-step learning >>>
+                    if current_failure_chain:
+                        self.async_pool.submit(
+                            self.solution_miner.mine_and_save_from_chain,
+                            current_failure_chain, # Pass the whole chain
+                            current_code
+                        )
+                        current_failure_chain = [] # Reset the chain after learning
+
                     return current_code
                 
                 last_error = output
@@ -136,7 +133,9 @@ class CircuitWeaverOrchestrator:
                 print(f"🔴 [Job {self.job_id}] Code for Attempt #{attempt_num} failed. Error:\n{last_error}")
                 self._save_artifact(f"2_attempt_{attempt_num}_error.txt", last_error)
 
-            # 2. Prepare for the fix
+            # <<< KEY CHANGE: Add the new failure to the chain >>>
+            current_failure_chain.append((code_to_debug, last_error))
+
             rag_context = self.rag_tool.forward(query=last_error.strip().split('\n')[-1])
             kb_context = self.kb_manager.get_relevant_solutions(last_error)
             full_context = f"{rag_context}\n\n{kb_context}".strip()
@@ -144,10 +143,8 @@ class CircuitWeaverOrchestrator:
             debug_prompt = debugger_prompts.get_debug_prompt(code_to_debug, last_error, full_context)
             conversation_history.append(HumanMessage(content=debug_prompt))
 
-            # 3. Race models and collect all results
             fix_responses = self._race_models_for_fix(conversation_history)
             
-            # 4. Process results: find a winner or aggregate failures
             validated_results = []
             successful_fix = None
             for model_idx, response_content in fix_responses.items():
@@ -160,7 +157,6 @@ class CircuitWeaverOrchestrator:
                         "model_idx": model_idx, "code": code_snippet, "error": result_or_error
                     })
 
-            # 5. Update state for the next loop
             if successful_fix:
                 print(f"🏆 [Job {self.job_id}] Model #{successful_fix['model_idx']} found a valid fix!")
                 current_code = successful_fix['code']
@@ -170,16 +166,15 @@ class CircuitWeaverOrchestrator:
                 failure_summary = self._create_failure_summary(attempt_num, validated_results)
                 conversation_history.append(AIMessage(content=failure_summary))
                 
-                # *** CRITICAL BUG FIX ***
-                # Set the next code to debug to the first model's failed attempt. This ensures the loop moves forward.
                 if validated_results:
                     current_code = validated_results[0]['code']
                 else:
-                    # If no models even returned code, we are stuck. Keep the old code.
+
                     current_code = code_to_debug 
         
         return None
 
+    # ... The rest of the file (_create_failure_summary, _race_models_for_fix, etc.) remains exactly the same ...
     def _create_failure_summary(self, attempt_num: int, results: list) -> str:
         """Builds a detailed summary of all failed attempts for the conversation history."""
         if not results:
@@ -226,7 +221,6 @@ class CircuitWeaverOrchestrator:
             pass
         return None
 
-    # <<< KEY CHANGE: _validate_fix now returns a tuple (bool, str, str) and saves artifacts >>>
     def _validate_fix(self, response_content: str, model_idx: int, attempt_num: int) -> tuple[bool, str, str]:
         code = self._extract_python_code(response_content)
         model_name = models.MODELS_FOR_FIXING[model_idx]
@@ -251,7 +245,6 @@ class CircuitWeaverOrchestrator:
             self._save_artifact(f"{model_filename_prefix}_error.txt", output)
             return False, output, code
 
-    # ... (rest of the file is unchanged) ...
     def _extract_python_code(self, content: str) -> str:
         match = re.search(r"```python\n(.*?)\n```", content, re.DOTALL)
         if match:

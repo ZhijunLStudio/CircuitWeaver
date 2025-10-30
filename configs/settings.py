@@ -6,8 +6,7 @@ CORPUS_DIR = os.path.join(PROJECT_ROOT, "corpus", "cleaned_markdown_corpus")
 RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
 VECTOR_DB_PATH = os.path.join(PROJECT_ROOT, "corpus", "vector_db")
 
-MAX_DEBUG_ATTEMPTS = 5
-
+MAX_DEBUG_ATTEMPTS = 50
 
 
 CHUNK_SIZE = 1000

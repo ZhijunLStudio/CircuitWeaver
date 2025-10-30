@@ -1,5 +1,6 @@
 # src/core/solution_miner.py
 import re
+import json
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from src.db.knowledge_base import KnowledgeBaseManager
@@ -12,61 +13,86 @@ class SolutionMiner:
             api_key=models.API_KEY,
             base_url=models.BASE_URL,
             temperature=0.0,
+            # Request a JSON response from the model
+            model_kwargs={"response_format": {"type": "json_object"}},
         )
         self.kb_manager = KnowledgeBaseManager()
 
-    def mine_and_save_solution(self, failed_code: str, error_message: str, successful_code: str):
-        print("⛏️ Mining for solution pattern...")
-        core_error = error_message.strip().split('\n')[-1]
+    def mine_and_save_from_chain(self, failure_chain: list, successful_code: str):
+        if not failure_chain:
+            return
+
+        print(f"⛏️ Mining for solutions from a chain of {len(failure_chain)} failures...")
         
+        # Format the failure chain for the prompt
+        formatted_failures = ""
+        for i, (code, error) in enumerate(failure_chain):
+            formatted_failures += f"--- Failure #{i+1} ---\n"
+            formatted_failures += f"ERROR MESSAGE:\n```\n{error}\n```\n"
+            # Optional: Add code snippet for more context, but can make prompt very long
+            # formatted_failures += f"FAILED CODE THAT CAUSED IT:\n```python\n{code}\n```\n"
+
         prompt = f"""
-You are a code analysis AI. Your task is to extract the core problem and its solution from the provided code diff.
+You are an expert code analysis AI. Your task is to analyze a sequence of failures that ultimately led to a successful code fix.
+You must identify each unique root cause of error in the failure sequence and provide a general solution for it.
 
-**FAILED CODE SNIPPET:**
-```python
-{failed_code}
-```
+**FAILURE SEQUENCE:**
+{formatted_failures}
 
-**ERROR MESSAGE:**
-```
-{error_message}
-```
-
-**SUCCESSFUL CODE SNIPPET:**
+**SUCCESSFUL CODE THAT FIXED EVERYTHING:**
 ```python
 {successful_code}
 ```
 
-Based on the difference between the failed and successful code, and the error message, answer the following two questions in plain text.
-1.  **Error Pattern**: Summarize the core error in one concise line. This will be used as a database key. Example: `AttributeError: module 'schemdraw.elements' has no attribute 'Vcc'`.
-2.  **Solution Summary**: Describe the general solution in one or two sentences. Do NOT include code. Example: "The power supply element 'Vcc' is incorrect. The correct element in schemdraw is 'elm.Vdd'."
+**INSTRUCTIONS:**
+1. Review the entire failure sequence. Identify each distinct error pattern.
+2. For each unique error pattern, determine the general solution based on the final successful code.
+3. Your output MUST be a JSON object containing a single key "solutions", which is a list of objects.
+4. Each object in the list must have two keys: "error_pattern" (a one-line summary of the error) and "solution_summary" (a one-or-two-sentence general solution, without code).
+5. Only include solutions for errors that are clearly resolved by the final code. Do not guess.
 
-**YOUR RESPONSE (must be in this exact format):**
-Error Pattern: [Your one-line summary here]
-Solution Summary: [Your one-to-two sentence summary here]
+**EXAMPLE JSON OUTPUT FORMAT:**
+{{
+  "solutions": [
+    {{
+      "error_pattern": "ImportError: cannot import name 'opamp' from 'schemdraw'",
+      "solution_summary": "The 'opamp' element is not a top-level module. It should be imported from 'schemdraw.elements', typically using 'import schemdraw.elements as elm' and then accessed via 'elm.Opamp'."
+    }},
+    {{
+      "error_pattern": "AttributeError: 'BBox' object has no attribute 'y1'",
+      "solution_summary": "The bounding box object 'BBox' in schemdraw uses 'ymin' and 'ymax' attributes to define its vertical boundaries, not 'y1' or 'y2'."
+    }}
+  ]
+}}
 """
         
         messages = [
-            SystemMessage(content="You are a precise code analysis assistant."),
+            SystemMessage(content="You are a precise code analysis assistant that outputs structured JSON."),
             HumanMessage(content=prompt)
         ]
         
         try:
             response = self.llm.invoke(messages).content
-            error_pattern_match = re.search(r"Error Pattern: (.*)", response)
-            solution_summary_match = re.search(r"Solution Summary: (.*)", response, re.DOTALL)
+            solution_data = json.loads(response)
             
-            if error_pattern_match and solution_summary_match:
-                error_pattern = error_pattern_match.group(1).strip()
-                solution_summary = solution_summary_match.group(1).strip()
-                
-                if error_pattern and solution_summary:
-                    self.kb_manager.add_solution(error_pattern, solution_summary)
-                else:
-                    print("Could not extract a valid pattern/solution from LLM response.")
+            if "solutions" in solution_data and isinstance(solution_data["solutions"], list):
+                if not solution_data["solutions"]:
+                    print("⛏️ Miner LLM returned no distinct solutions from the chain.")
+                    return
+
+                for solution in solution_data["solutions"]:
+                    if "error_pattern" in solution and "solution_summary" in solution:
+                        self.kb_manager.add_solution(
+                            solution["error_pattern"],
+                            solution["solution_summary"]
+                        )
+                    else:
+                        print(f"Warning: Malformed solution object found: {solution}")
+                print(f"🧠 Successfully mined and saved {len(solution_data['solutions'])} new solutions from the chain.")
             else:
-                print(f"Could not parse solution from LLM response:\n{response}")
+                print(f"Could not parse a valid 'solutions' list from LLM JSON response: {response}")
 
+        except json.JSONDecodeError:
+            print(f"Error: Failed to decode JSON from LLM response:\n{response}")
         except Exception as e:
-            print(f"An error occurred during solution mining: {e}")
-
+            print(f"An error occurred during multi-step solution mining: {e}")
