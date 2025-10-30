@@ -8,6 +8,8 @@ configs/models.py
 corpus/
 results/
 knowledge_base/
+results-old/
+successful_circuits/
 
 # IDE / OS files
 .vscode/
