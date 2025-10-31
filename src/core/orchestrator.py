@@ -177,29 +177,27 @@ class CircuitWeaverOrchestrator:
             print(f"   💥 [Job {self.job_id}] Model #{model_idx} ({model_name}) invoke failed: {e}")
             return None
 
-    def _validate_fix(self, response_content: str, model_idx: int, round_dir: str) -> tuple[bool, str, str]:
+    def _validate_fix(self, response_content: str, model_idx: int, round_dir: str) -> tuple[bool, str, str, str]:
         model_name = models.MODELS_FOR_FIXING[model_idx]
         validation_dir = os.path.join(round_dir, f"model_{model_idx}_{model_name.replace('/', '_')}")
         
         code = self._extract_python_code(response_content)
         if not code:
             error_msg = "Model did not return a valid Python code block."
-            # --- RESTORED LOGGING ---
             print(f"   ❌ [Job {self.job_id}] Code from Model #{model_idx} ({model_name}) FAILED: {error_msg}")
             os.makedirs(validation_dir, exist_ok=True)
             with open(os.path.join(validation_dir, "error.txt"), "w", encoding='utf-8') as f: f.write(error_msg)
-            return False, error_msg, ""
+            return False, error_msg, "", validation_dir
 
-        # --- RESTORED LOGGING ---
         print(f"   [Job {self.job_id}] Validating code from Model #{model_idx} ({model_name})...")
         success, output = self.sandbox.run(code, validation_dir)
         
         if success:
             print(f"   ✅ [Job {self.job_id}] Code from Model #{model_idx} ({model_name}) is VALID.")
-            return True, code, code
+            return True, code, code, validation_dir
         else:
             print(f"   ❌ [Job {self.job_id}] Code from Model #{model_idx} ({model_name}) FAILED validation.")
-            return False, output, code
+            return False, output, code, validation_dir
 
     def _create_failure_summary(self, attempt_num: int, results: list) -> str:
         if not results:

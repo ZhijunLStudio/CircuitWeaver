@@ -30,3 +30,4 @@ torch
 unstructured[md]
 # For progress bars during data loading
 tqdm
+cairosvg

@@ -9,6 +9,7 @@ corpus/
 results/
 knowledge_base/
 results-old/
+results-mid/
 successful_circuits/
 
 # IDE / OS files
