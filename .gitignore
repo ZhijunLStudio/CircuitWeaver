@@ -11,6 +11,9 @@ knowledge_base/
 results-old/
 results-mid/
 successful_circuits/
+schemdraw.readthedocs.io/
+
+successful_circuits-old/
 
 # IDE / OS files
 .vscode/

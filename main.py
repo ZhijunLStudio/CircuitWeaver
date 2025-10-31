@@ -1,4 +1,3 @@
-# main.py
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -11,6 +10,8 @@ import traceback
 # --- KEY FIX: Import the finest-grained initializers ---
 from src.tools.documentation_search_tool import init_embedding_model, init_doc_retriever
 from src.core.success_code_manager import init_success_code_manager
+# NEW: Import the new initializer for the example retriever
+from src.tools.example_retriever_tool import init_example_retriever
 from src.core.orchestrator import CircuitWeaverOrchestrator
 from configs import settings
 
@@ -31,8 +32,7 @@ def run_orchestrator_instance(job_id: int, async_pool):
         orchestrator.run()
     except Exception as e:
         print(f"🚨 FATAL ERROR in Job #{job_id}: {e}")
-        # Optionally print traceback for worker errors
-        # traceback.print_exc()
+        traceback.print_exc()
     finally:
         end_time = time.time()
         print(f"--- ✅ Job #{job_id} Finished in {end_time - start_time:.2f} seconds ---")
@@ -44,7 +44,8 @@ def main_loop(max_jobs: int, num_workers: int):
     with ThreadPoolExecutor(max_workers=num_workers * 2, thread_name_prefix="SolutionMiner") as async_task_pool:
         with ThreadPoolExecutor(max_workers=num_workers, thread_name_prefix="CircuitAgent") as main_executor:
             futures = set()
-            for i in range(min(num_workers, max_jobs if max_jobs > 0 else num_workers)):
+            initial_job_count = min(num_workers, max_jobs if max_jobs > 0 else num_workers)
+            for i in range(initial_job_count):
                 job_counter += 1
                 future = main_executor.submit(run_orchestrator_instance, job_counter, async_task_pool)
                 futures.add(future)
@@ -68,18 +69,17 @@ def main_loop(max_jobs: int, num_workers: int):
                 stop_event.set()
                 for f in futures: f.cancel()
             
-            # Wait for all futures to complete
             for future in as_completed(futures): pass
     print("\n🏭 Agent Factory has shut down.")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the CircuitWeaver Agent Factory.")
-    parser.add_argument("-n", "--num-jobs", type=int, default=10)
-    parser.add_argument("-w", "--workers", type=int, default=2)
+    parser.add_argument("-n", "--num-jobs", type=int, default=10, help="Total jobs to run. 0 for infinite.")
+    parser.add_argument("-w", "--workers", type=int, default=2, help="Number of concurrent agents.")
     args = parser.parse_args()
 
-    # --- KEY FIX: Absolutely sequential, fine-grained initialization ---
+    # --- KEY: Absolutely sequential, fine-grained initialization ---
     print("Pre-initializing all shared resources to prevent deadlocks...")
     try:
         # Step 1: Initialize the heaviest and most foundational resource first.
@@ -88,6 +88,8 @@ if __name__ == "__main__":
         # Step 2: Initialize resources that depend on the embedding model.
         init_doc_retriever()
         init_success_code_manager()
+        # NEW: Initialize the circuit examples retriever
+        init_example_retriever()
         
         print("\n✅ All shared resources initialized successfully.\n")
     except Exception as e:
@@ -95,5 +97,4 @@ if __name__ == "__main__":
         traceback.print_exc()
         exit(1)
     
-    # Only if initialization is successful, start the main loop.
     main_loop(max_jobs=args.num_jobs, num_workers=args.workers)

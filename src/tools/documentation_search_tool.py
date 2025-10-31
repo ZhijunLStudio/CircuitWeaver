@@ -1,4 +1,3 @@
-# src/tools/documentation_search_tool.py
 import os
 import torch
 from smolagents import Tool
@@ -23,28 +22,34 @@ def init_embedding_model():
                 model_kwargs={'device': device, 'trust_remote_code': True},
                 encode_kwargs={'normalize_embeddings': True}
             )
-            # Perform a test query to ensure the model is fully loaded and materialized
             embedding_model_instance.embed_query("warm-up query")
             print("--- 🧠 Shared Embedding Model Initialized and Warmed Up ---")
         except Exception as e:
             print(f"FATAL: Failed to initialize Embedding Model. Error: {e}")
             raise e
 
+# <<< 核心修正：添加 Getter 函数 >>>
+def get_embedding_model():
+    """安全地获取已初始化的 embedding model 实例。"""
+    if embedding_model_instance is None:
+        raise RuntimeError("Embedding model not initialized. Call init_embedding_model() from main thread first.")
+    return embedding_model_instance
+
 def init_doc_retriever():
-    """初始化文档检索器。必须在 init_embedding_model 之后调用。"""
+    """初始化文档检索器。"""
     global doc_retriever_instance
     if doc_retriever_instance is None:
         print("--- 🧠 Initializing Shared Documentation Vector Store (ONCE) ---")
-        if embedding_model_instance is None:
-            raise RuntimeError("Embedding model must be initialized before the doc retriever.")
-            
+        # 使用 getter 获取模型，确保它已被初始化
+        embedding_model = get_embedding_model() 
+        
         if not os.path.exists(settings.VECTOR_DB_PATH):
             raise FileNotFoundError(f"Vector DB not found. Run 'build_vector_db.py' first.")
         
         try:
             doc_vector_store = FAISS.load_local(
                 settings.VECTOR_DB_PATH, 
-                embedding_model_instance, 
+                embedding_model, 
                 allow_dangerous_deserialization=True
             )
             doc_retriever_instance = doc_vector_store.as_retriever(search_kwargs={"k": 3})
@@ -54,7 +59,6 @@ def init_doc_retriever():
             raise e
 
 class DocumentationSearchTool(Tool):
-    # ... (class definition is unchanged) ...
     name = "documentation_search"
     description = "Searches schemdraw docs for errors or API usage questions."
     inputs = {"query": {"type": "string", "description": "Error message or API question."}}
@@ -62,7 +66,7 @@ class DocumentationSearchTool(Tool):
 
     def forward(self, query: str) -> str:
         if doc_retriever_instance is None:
-            raise RuntimeError("Shared resources not initialized. Call initializers from main thread.")
+            raise RuntimeError("Doc retriever not initialized. Call initializers from main thread.")
             
         print(f"Executing RAG search on Documentation with query: '{query}'")
         results = doc_retriever_instance.invoke(query)

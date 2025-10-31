@@ -1,4 +1,3 @@
-# src/core/success_code_manager.py
 import os
 import json
 import uuid
@@ -9,11 +8,13 @@ from langchain_community.docstore.document import Document
 from configs import settings
 import faiss
 
+# <<< 核心修正：导入 getter 函数 >>>
+from src.tools.documentation_search_tool import get_embedding_model
+
 # --- 全局单例 ---
 success_code_manager_instance = None
 
 class SuccessCodeManager:
-    # --- KEY FIX: __init__ now accepts the embedding model as a parameter ---
     def __init__(self, embedding_model):
         if embedding_model is None:
             raise ValueError("Embedding model cannot be None.")
@@ -23,11 +24,10 @@ class SuccessCodeManager:
         self.vector_db_path = os.path.join(self.repo_path, "vector_db")
         os.makedirs(self.repo_path, exist_ok=True)
 
-        self.embedding_model = embedding_model # Use the injected model
+        self.embedding_model = embedding_model
         self.vector_store = None
         self._load_or_initialize()
     
-    # ... (rest of the class is the same as the last version) ...
     def _load_or_initialize(self):
         if os.path.exists(self.vector_db_path):
             try:
@@ -52,7 +52,6 @@ class SuccessCodeManager:
         self.vector_store = FAISS(embedding_function=self.embedding_model, index=index, docstore=docstore, index_to_docstore_id=index_to_docstore_id)
 
     def add_success(self, code: str, idea: str):
-        # ... (no change here)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         unique_id = uuid.uuid4().hex[:8]
         filename = f"{timestamp}_{unique_id}.py"
@@ -71,7 +70,6 @@ class SuccessCodeManager:
         print(f"✅ Successfully added new code to success repo: {filename}")
 
     def retrieve_successes(self, query_idea: str, k: int) -> str:
-        # ... (no change here)
         if k == 0 or not hasattr(self.vector_store.index, 'ntotal') or self.vector_store.index.ntotal == 0:
             return "No successful examples found in the repository."
 
@@ -101,17 +99,15 @@ class SuccessCodeManager:
             print(f"Error during success code retrieval: {e}")
             return "An error occurred while retrieving successful examples."
 
-# --- KEY FIX: The init function now performs dependency injection ---
 def init_success_code_manager():
     global success_code_manager_instance
     if success_code_manager_instance is None:
         print("--- 🏭 Initializing Shared SuccessCodeManager (ONCE) ---")
-        # The key is that the dependency is fetched here
-        from src.tools.documentation_search_tool import embedding_model_instance
-        if embedding_model_instance is None:
-             raise RuntimeError("Embedding model must be initialized before SuccessCodeManager.")
         
-        success_code_manager_instance = SuccessCodeManager(embedding_model=embedding_model_instance)
+        # <<< 核心修正：调用 getter 来安全地获取模型 >>>
+        embedding_model = get_embedding_model()
+        
+        success_code_manager_instance = SuccessCodeManager(embedding_model=embedding_model)
         print("--- 🏭 Shared SuccessCodeManager Initialized ---")
 
 def get_success_code_manager():
