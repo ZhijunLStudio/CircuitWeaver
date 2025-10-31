@@ -35,3 +35,15 @@ SANDBOX_TIMEOUT = 120
 # --- RAG (for documentation) ---
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
+
+# --- Agent Settings ---
+# MAX_DEBUG_ATTEMPTS is now deprecated, we use the two below
+MAX_RUNTIME_DEBUG_ATTEMPTS = 10 # Attempts to make the code runnable
+
+
+# --- Layout Analysis & Debugging ---
+MAX_LAYOUT_DEBUG_ATTEMPTS = 5 # Number of attempts to fix visual layout issues
+LAYOUT_ANALYSIS_CONFIG = {
+    'alignment_tolerance': 0.1, # Tolerance for checking if elements are aligned
+    'allow_diagonal_lines': False # Whether to flag diagonal lines as an issue
+}

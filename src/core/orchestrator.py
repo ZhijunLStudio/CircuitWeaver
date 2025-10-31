@@ -6,6 +6,8 @@ import time
 from datetime import datetime
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import schemdraw
+import schemdraw.elements as elm
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
@@ -19,6 +21,7 @@ from src.db.knowledge_base import KnowledgeBaseManager
 from src.core.success_code_manager import get_success_code_manager
 from src.utils.image_utils import resize_and_encode_image
 from src.tools.example_retriever_tool import ExampleRetrieverTool
+from src.utils.layout_analyzer import LayoutAnalyzer
 
 
 class CircuitWeaverOrchestrator:
@@ -55,11 +58,11 @@ class CircuitWeaverOrchestrator:
             circuit_idea = self._generate_circuit_idea()
             self._save_artifact("1_circuit_idea.txt", circuit_idea)
             
-            print(f"\n[Job {self.job_id}] --- STAGE 2: Multi-Modal Generation & Debugging ---")
-            final_code = self._generate_and_debug_code(circuit_idea)
+            print(f"\n[Job {self.job_id}] --- STAGE 2: Code Generation and Refinement ---")
+            final_code = self._generation_and_refinement_workflow(circuit_idea)
             
             if final_code:
-                print(f"\n✅ [Job {self.job_id}] Agent successfully generated a working script.")
+                print(f"\n✅ [Job {self.job_id}] Agent successfully generated a visually and functionally valid script.")
                 self._save_artifact("final_successful_code.py", final_code)
 
                 final_run_dir = os.path.join(self.results_dir, "final_run")
@@ -70,10 +73,9 @@ class CircuitWeaverOrchestrator:
                         shutil.copy(final_svg_path, os.path.join(self.results_dir, "final_successful_diagram.svg"))
                         print(f"🖼️  Copied final diagram to root directory.")
                 
-                # We still save the new, high-quality success to build a better library from scratch
                 self.success_code_manager.add_success(final_code, circuit_idea)
             else:
-                print(f"\n❌ [Job {self.job_id}] Agent failed to generate a working script after all attempts. Orchestration stopped.")
+                print(f"\n❌ [Job {self.job_id}] Agent failed to produce a valid script after all attempts. Orchestration stopped.")
 
         except Exception as e:
             print(f"\n🚨 [Job {self.job_id}] An unexpected error occurred in the orchestrator: {e}")
@@ -82,114 +84,187 @@ class CircuitWeaverOrchestrator:
             print(f"\n--- [Job {self.job_id}] Orchestration Complete ---")
             print(f"All artifacts for Job {self.job_id} saved in: {self.results_dir}")
 
-    def _generate_circuit_idea(self) -> str:
-        return self.planner_llm.invoke([HumanMessage(content=planner_prompts.GET_IDEA_PROMPT)]).content
+    def _generation_and_refinement_workflow(self, circuit_idea: str) -> str | None:
+        initial_code = self._generate_initial_code(circuit_idea)
+        if not initial_code: return None
 
-    def _generate_and_debug_code(self, circuit_idea: str) -> str | None:
-        # STAGE 2.1: Retrieve high-quality, curated examples
-        print(f"\n[Job {self.job_id}] Retrieving {settings.EXAMPLE_RAG_K} visual examples from standard library...")
+        runnable_code = self._runtime_debugging_loop(initial_code, circuit_idea)
+        if not runnable_code:
+            print(f"❌ [Job {self.job_id}] Failed to produce a runnable script in the Runtime Debugging Workshop.")
+            return None
+        
+        print(f"✅ [Job {self.job_id}] Exited Runtime Workshop. Code is now runnable.")
+        self._save_artifact("4_runnable_code.py", runnable_code)
+
+        polished_code = self._layout_polishing_loop(runnable_code)
+        if not polished_code:
+            print(f"🟡 [Job {self.job_id}] Failed to polish layout. Returning the last runnable version.")
+            return runnable_code
+        
+        print(f"✅ [Job {self.job_id}] Exited Layout Workshop. Code has been polished.")
+        return polished_code
+
+    def _generate_initial_code(self, circuit_idea: str) -> str | None:
+        print(f"\n[Job {self.job_id}] --- Step 2.1: Initial Code Generation ---")
         retrieved_examples = self.example_retriever.forward(circuit_idea, k=settings.EXAMPLE_RAG_K)
         reference_codes = "\n\n---\n\n".join([ex['code'] for ex in retrieved_examples])
 
-        # STAGE 2.2: Generate Layout Plan based on curated examples
-        print(f"[Job {self.job_id}] Generating high-level layout plan...")
-        planning_prompt = coder_prompts.PLANNING_PROMPT.format(
-            circuit_idea=circuit_idea,
-            reference_examples_code=reference_codes
-        )
+        planning_prompt = coder_prompts.PLANNING_PROMPT.format(circuit_idea=circuit_idea, reference_examples_code=reference_codes)
         execution_plan = self.planner_llm.invoke([HumanMessage(content=planning_prompt)]).content
         self._save_artifact("2_execution_plan.md", execution_plan)
-        print(f"[Job {self.job_id}] Layout plan generated successfully.")
-
-        # STAGE 2.3: Generate Code from Plan using Multi-Modal LLM
-        print(f"[Job {self.job_id}] Generating initial code from plan using multi-modal context...")
         
-        codegen_prompt = coder_prompts.CODEGEN_FROM_PLAN_PROMPT.format(
-            circuit_idea=circuit_idea,
-            execution_plan=execution_plan
-        )
+        codegen_prompt = coder_prompts.CODEGEN_FROM_PLAN_PROMPT.format(circuit_idea=circuit_idea, execution_plan=execution_plan)
         codegen_message_content = [{"type": "text", "text": codegen_prompt}]
-        
-        for i, example in enumerate(retrieved_examples):
+        for example in retrieved_examples:
             if example.get('image_path'):
                 full_image_path = os.path.join(settings.PROCESSED_CIRCUITS_DIR, example['image_path'])
                 b64_image = resize_and_encode_image(full_image_path, settings.MAX_IMAGE_DIMENSION)
                 if b64_image:
-                    print(f"  > Attaching reference image #{i+1} to prompt...")
-                    codegen_message_content.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{b64_image}"}
-                    })
+                    codegen_message_content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_image}"}})
         
         response = self.coder_llm.invoke([HumanMessage(content=codegen_message_content)])
-        current_code = self._extract_python_code(response.content)
-        self._save_artifact("3_initial_generated_code.py", current_code)
-        
-        if not current_code:
-            print("🔴 [Job {self.job_id}] Initial code generation failed (no code produced). Aborting.")
-            return None
+        code = self._extract_python_code(response.content)
+        self._save_artifact("3_initial_generated_code.py", code)
+        return code if code else None
 
-        # STAGE 2.4: Runtime Validation & Debug Loop
-        current_failure_chain = []
-        for i in range(settings.MAX_DEBUG_ATTEMPTS):
+    def _runtime_debugging_loop(self, code_to_debug: str, circuit_idea: str) -> str | None:
+        print(f"\n[Job {self.job_id}] --- Entering Runtime Debugging Workshop ---")
+        current_code = code_to_debug
+        failure_chain = []
+
+        for i in range(settings.MAX_RUNTIME_DEBUG_ATTEMPTS):
             attempt_num = i + 1
-            print(f"\n[Job {self.job_id}] " + "="*15 + f" Validation Attempt #{attempt_num} " + "="*15)
+            print(f"[Job {self.job_id}] Runtime check, attempt {attempt_num}/{settings.MAX_RUNTIME_DEBUG_ATTEMPTS}...")
             
-            attempt_dir = os.path.join(self.results_dir, f"attempt_{attempt_num}_validation")
-            success, error = self.sandbox.run(current_code, attempt_dir)
-
+            validation_dir = os.path.join(self.results_dir, f"runtime_check_{attempt_num}")
+            success, error = self.sandbox.run(current_code, validation_dir)
+            
             if success:
-                print(f"🟢 [Job {self.job_id}] Code is valid in attempt #{attempt_num}!")
-                if current_failure_chain:
-                    self.async_pool.submit(self.solution_miner.mine_and_save_from_chain, current_failure_chain, current_code)
+                if failure_chain:
+                    self.async_pool.submit(self.solution_miner.mine_and_save_from_chain, failure_chain, current_code)
                 return current_code
-            
-            print(f"🔴 [Job {self.job_id}] Code failed validation. See directory: attempt_{attempt_num}_validation")
-            print(f"Error Details:\n{error}")
-            current_failure_chain.append((current_code, error))
-            
-            print(f"\n[Job {self.job_id}] " + "="*15 + f" Debug Attempt #{attempt_num}/{settings.MAX_DEBUG_ATTEMPTS} " + "="*15)
-            
-            rag_context = self.rag_tool.forward(query=error.strip().split('\n')[-1])
-            kb_context = self.kb_manager.get_relevant_solutions(error)
-            
-            # ========================= KEY CHANGE =========================
-            # Temporarily disable retrieving from the self-generated success repo.
-            # This prevents potentially low-quality examples from influencing the debugging process.
-            # To re-enable later, uncomment the following two lines and comment out the third.
-            #
-            # successful_examples = self.success_code_manager.retrieve_successes(circuit_idea, k=settings.SUCCESS_CODE_RAG_K)
-            # full_context = f"{rag_context}\n\n{kb_context}\n\n{successful_examples}".strip()
-            
-            # The full context for debugging will now ONLY contain documentation and the knowledge base.
-            full_context = f"{rag_context}\n\n{kb_context}".strip()
-            # ======================= END OF KEY CHANGE =======================
 
-            debug_prompt = debugger_prompts.get_debug_prompt(current_code, error, full_context)
-            conversation_history = [HumanMessage(content=debug_prompt)]
-
-            fix_round_dir = os.path.join(self.results_dir, f"attempt_{attempt_num}_fix_round")
-            fix_responses = self._race_models_for_fix(conversation_history)
+            print(f"🔴 Runtime error detected: {error.strip().splitlines()[-1]}")
+            failure_chain.append((current_code, error))
             
-            validated_results, successful_fix = [], None
-            for model_idx, response_content in fix_responses.items():
-                is_valid, result_or_error, code_snippet, _ = self._validate_fix(response_content, model_idx, fix_round_dir)
-                if is_valid:
-                    successful_fix = {"response": response_content, "code": result_or_error, "model_idx": model_idx}
-                    break
+            fix_result = self._handle_runtime_error(current_code, error, circuit_idea, attempt_num)
+            
+            if fix_result and fix_result.get('best_attempt_code'):
+                current_code = fix_result['best_attempt_code']
+                if fix_result.get('successful_code'):
+                    print("🏆 Runtime fix successful. Re-validating immediately.")
                 else:
-                    validated_results.append({"model_idx": model_idx, "code": code_snippet, "error": result_or_error})
-
-            if successful_fix:
-                print(f"🏆 [Job {self.job_id}] Model #{successful_fix['model_idx']} found a valid fix!")
-                current_code = successful_fix['code']
+                    print(f"🟡 Fix attempt failed. Progressing with a new (but still broken) attempt.")
             else:
-                print(f"🟡 [Job {self.job_id}] All models failed to provide a working fix in this attempt.")
-                if validated_results and validated_results[0]['code']: # Fallback to the first failed attempt's code if it exists
-                    current_code = validated_results[0]['code']
-                # If no model even produced code, we re-use the original failed code for the next attempt.
+                print(f"🔴 Catastrophic failure: no models produced any code. Aborting runtime workshop.")
+                return None
         
         return None
+
+    def _layout_polishing_loop(self, runnable_code: str) -> str | None:
+        print(f"\n[Job {self.job_id}] --- Entering Layout Polishing Workshop ---")
+        current_code = runnable_code
+
+        for i in range(settings.MAX_LAYOUT_DEBUG_ATTEMPTS):
+            attempt_num = i + 1
+            print(f"[Job {self.job_id}] Layout check, attempt {attempt_num}/{settings.MAX_LAYOUT_DEBUG_ATTEMPTS}...")
+
+            try:
+                local_scope = {'schemdraw': schemdraw, 'elm': elm}
+                code_to_exec = current_code.replace("with schemdraw.Drawing(", "d = schemdraw.Drawing(")
+                exec(code_to_exec, local_scope, local_scope)
+                drawing_obj = local_scope.get('d')
+                if not drawing_obj: raise ValueError("'d' object not found.")
+                drawing_obj.draw()
+
+                analyzer = LayoutAnalyzer(drawing_obj, settings.LAYOUT_ANALYSIS_CONFIG)
+                layout_issues = analyzer.run_all_checks()
+
+                if not layout_issues:
+                    print(f"🎉 [Job {self.job_id}] Layout analysis passed! Polishing complete.")
+                    return current_code
+                
+                print(f"🟡 Found {len(layout_issues)} layout issues. Requesting fix.")
+                layout_report = analyzer.generate_report()
+                self._save_artifact(f"layout_check_{attempt_num}_report.md", layout_report)
+                
+                fixed_code_proposal_result = self._handle_layout_error(current_code, layout_report, attempt_num)
+
+                if not fixed_code_proposal_result or not fixed_code_proposal_result.get('best_attempt_code'):
+                    print("🟡 Layout fix failed to produce new code. Aborting polish.")
+                    return current_code
+
+                fixed_code_proposal = fixed_code_proposal_result['best_attempt_code']
+
+                print("[Job {self.job_id}] Verifying that the layout fix is still runnable...")
+                verify_dir = os.path.join(self.results_dir, f"layout_fix_{attempt_num}_verify")
+                success, _ = self.sandbox.run(fixed_code_proposal, verify_dir)
+
+                if success:
+                    print("🟢 Layout fix is valid. Continuing loop.")
+                    current_code = fixed_code_proposal
+                else:
+                    print("🔴 Layout fix introduced a runtime error! Rejecting fix and trying again.")
+                    continue
+
+            except Exception as e:
+                print(f"🔴 Critical error during layout analysis: {e}. Aborting polish.")
+                return current_code
+
+        print(f"🟡 [Job {self.job_id}] Reached max layout attempts. Returning best available code.")
+        return current_code
+
+    def _handle_runtime_error(self, code, error, circuit_idea, attempt_num):
+        rag_context = self.rag_tool.forward(query=error.strip().split('\n')[-1])
+        kb_context = self.kb_manager.get_relevant_solutions(error)
+        full_context = f"{rag_context}\n\n{kb_context}".strip()
+        
+        debug_prompt = debugger_prompts.get_debug_prompt(code, error, full_context)
+        fix_round_dir = os.path.join(self.results_dir, f"runtime_fix_round_{attempt_num}")
+        
+        return self._find_and_validate_fixes(debug_prompt, fix_round_dir)
+
+    def _handle_layout_error(self, code, report, attempt_num):
+        layout_debug_prompt = debugger_prompts.get_layout_debug_prompt(code, report)
+        fix_round_dir = os.path.join(self.results_dir, f"layout_fix_round_{attempt_num}")
+        
+        return self._find_and_validate_fixes(layout_debug_prompt, fix_round_dir)
+
+    def _find_and_validate_fixes(self, prompt, round_dir):
+        history = [HumanMessage(content=prompt)]
+        fix_responses = self._race_models_for_fix(history)
+        
+        validated_attempts = []
+        for model_idx, response_content in fix_responses.items():
+            code_proposal = self._extract_python_code(response_content)
+            if not code_proposal: continue
+            
+            model_name = models.MODELS_FOR_FIXING[model_idx]
+            validation_dir = os.path.join(round_dir, f"model_{model_idx}_{model_name.replace('/', '_')}")
+
+            success, error = self.sandbox.run(code_proposal, validation_dir)
+            
+            validated_attempts.append({
+                "code": code_proposal,
+                "is_success": success,
+                "error": error
+            })
+            
+            if success:
+                print(f"🏆 Model #{model_idx} ({model_name}) provided a valid, runnable fix.")
+                return {
+                    "successful_code": code_proposal,
+                    "best_attempt_code": code_proposal
+                }
+        
+        print(f"🟡 All models failed to provide a runnable fix.")
+        if validated_attempts:
+            return {"best_attempt_code": validated_attempts[0]['code']}
+        else:
+            return None
+
+    def _generate_circuit_idea(self) -> str:
+        return self.planner_llm.invoke([HumanMessage(content=planner_prompts.GET_IDEA_PROMPT)]).content
 
     def _race_models_for_fix(self, history: list) -> dict:
         print(f"[Job {self.job_id}] Racing {len(self.fixer_llms)} models for a fix...")
@@ -204,17 +279,6 @@ class CircuitWeaverOrchestrator:
                 except Exception as e:
                     print(f"💥 [Job {self.job_id}] Model #{model_idx} submission failed: {e}")
         return responses
-
-    def _validate_fix(self, response_content: str, model_idx: int, round_dir: str) -> tuple[bool, str, str, str]:
-        model_name = models.MODELS_FOR_FIXING[model_idx]
-        validation_dir = os.path.join(round_dir, f"model_{model_idx}_{model_name.replace('/', '_')}")
-        
-        code = self._extract_python_code(response_content)
-        if not code:
-            return False, "Model did not return a valid Python code block.", "", validation_dir
-
-        success, output = self.sandbox.run(code, validation_dir)
-        return (True, code, code, validation_dir) if success else (False, output, code, validation_dir)
 
     def _extract_python_code(self, content: str) -> str:
         match = re.search(r"```python\n(.*?)\n```", content, re.DOTALL)

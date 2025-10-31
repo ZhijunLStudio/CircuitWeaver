@@ -40,3 +40,29 @@ You are part of a team of AI models. In the previous turn (visible in the conver
 Your output must ONLY be the corrected Python code inside a single ```python ... ``` block.
 """
     return prompt
+
+
+def get_layout_debug_prompt(original_code: str, layout_report: str) -> str:
+    """Creates a prompt specifically for fixing programmatic layout issues."""
+    return f"""
+You are an expert `schemdraw` designer specializing in clean, professional layouts.
+The provided Python script runs without errors, but an automated analysis has found several layout problems.
+
+**Original Code with Layout Issues:**
+```python
+{original_code}
+```
+
+**Automated Layout Analysis Report (You MUST fix these issues):**
+---
+{layout_report}
+---
+
+**YOUR TASK:**
+1.  Carefully read every issue in the report.
+2.  Rewrite the **ENTIRE** Python script to resolve all the reported layout violations.
+3.  Pay close attention to the suggestions provided in the report. Use methods like `.at()`, `loc=`, `offset=`, `.tox()`, and `.toy()` to create a clean and non-overlapping diagram.
+4.  Do NOT introduce any new components or change the circuit's fundamental logic. Your only goal is to improve the layout.
+
+Your output must be ONLY the complete, corrected Python code, enclosed in a single ```python ... ``` block.
+"""
