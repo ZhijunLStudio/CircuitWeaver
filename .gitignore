@@ -8,12 +8,13 @@ configs/models.py
 corpus/
 results/
 knowledge_base/
-results-old/
-results-mid/
-successful_circuits/
+
 schemdraw.readthedocs.io/
 
-successful_circuits-old/
+results*/
+successful_circuits*/
+
+seed_circuits*/
 
 # IDE / OS files
 .vscode/

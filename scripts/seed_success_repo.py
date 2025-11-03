@@ -13,7 +13,9 @@ from src.tools.documentation_search_tool import init_embedding_model, get_embedd
 from configs import settings
 
 # --- Configuration ---
-# 这是你存放高质量示例的源文件夹
+# <<< 核心修正 >>>
+# 这个脚本现在明确地从 `seed_circuits` 文件夹读取数据，
+# 这是由 `generate_ideas.py` 脚本准备好的、结构化的输入。
 SEED_DIR = "seed_circuits"
 
 def main():
@@ -21,14 +23,14 @@ def main():
 
     if not os.path.exists(SEED_DIR):
         print(f"Error: Seed directory '{SEED_DIR}' not found.")
-        print("Please create it and populate it with your high-quality examples.")
+        print(f"Please run 'python scripts/generate_ideas.py' first to create it from your source files.")
         return
 
     # --- Safety Check ---
     if os.path.exists(settings.SUCCESS_CODE_REPO_PATH):
         response = input(
-            f"WARNING: The directory '{settings.SUCCESS_CODE_REPO_PATH}' already exists.\n"
-            "This script will DELETE it and rebuild it from the seed data.\n"
+            f"WARNING: The production knowledge base '{settings.SUCCESS_CODE_REPO_PATH}' already exists.\n"
+            "This script will DELETE it and rebuild it from the seed data in '{SEED_DIR}'.\n"
             "Are you sure you want to continue? (y/N): "
         ).lower()
         if response != 'y':
@@ -47,7 +49,7 @@ def main():
         return
     
     # --- Process Seed Data ---
-    print(f"Processing examples from '{SEED_DIR}'...")
+    print(f"Processing structured examples from '{SEED_DIR}'...")
     
     # Manually create the manager without loading old data
     success_manager = SuccessCodeManager(embedding_model=embedding_model)
@@ -71,14 +73,14 @@ def main():
             with open(idea_path, 'r', encoding='utf-8') as f:
                 idea = f.read().strip()
             
-            # Manually perform the actions of `add_success` but in a batch-friendly way
-            # 1. Save the code file
+            # Manually perform the actions of `add_success`
+            # 1. Save the code file to the final destination
             filename = f"seed_{folder}.py"
             file_path = os.path.join(success_manager.repo_path, filename)
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(code)
 
-            # 2. Write to metadata.jsonl
+            # 2. Write to metadata.jsonl in the final destination
             success_manager._append_to_metadata(filename, idea)
 
             # 3. Collect document for batch vectorization
@@ -92,7 +94,7 @@ def main():
         print("No valid documents collected. Vector DB not built.")
         return
         
-    print("\nBuilding FAISS vector index from all seed examples...")
+    print(f"\nBuilding FAISS vector index for '{settings.SUCCESS_CODE_REPO_PATH}'...")
     vector_store = FAISS.from_documents(documents_for_faiss, embedding_model)
     vector_store.save_local(success_manager.vector_db_path)
     

@@ -3,17 +3,19 @@ import uuid
 import re
 import traceback
 import time
+import json
 from datetime import datetime
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import schemdraw
 import schemdraw.elements as elm
+from schemdraw import flow, dsp, logic # Import modules for exec scope
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 
 from configs import models, settings
-from prompts import planner_prompts, coder_prompts, debugger_prompts
+from prompts import planner_prompts, coder_prompts, debugger_prompts, architect_prompts
 from src.sandbox.local_sandbox import LocalCodeSandbox
 from src.tools.documentation_search_tool import DocumentationSearchTool
 from src.core.solution_miner import SolutionMiner
@@ -33,17 +35,19 @@ class CircuitWeaverOrchestrator:
         os.makedirs(self.results_dir, exist_ok=True)
         
         print(f"[Job {self.job_id}] Orchestrator initialized. Results: {self.results_dir}")
-
+        
+        # LLM Configurations
         llm_request_timeout = 300
         llm_max_retries = 2
-
         self.planner_llm = ChatOpenAI(model=models.MODEL_FOR_CREATION, api_key=models.API_KEY, base_url=models.BASE_URL, request_timeout=llm_request_timeout, max_retries=llm_max_retries)
+        self.architect_llm = ChatOpenAI(model=models.MODEL_FOR_CREATION, api_key=models.API_KEY, base_url=models.BASE_URL, request_timeout=llm_request_timeout, max_retries=llm_max_retries, model_kwargs={"response_format": {"type": "json_object"}})
         self.coder_llm = ChatOpenAI(model=models.MULTI_MODAL_MODEL, api_key=models.API_KEY, base_url=models.BASE_URL, request_timeout=llm_request_timeout, max_retries=llm_max_retries)
         self.fixer_llms = [
             ChatOpenAI(model_name=model, api_key=models.API_KEY, base_url=models.BASE_URL, temperature=0.2 + i * 0.1, request_timeout=llm_request_timeout, max_retries=llm_max_retries)
             for i, model in enumerate(models.MODELS_FOR_FIXING)
         ]
 
+        # Tool Initializations
         self.sandbox = LocalCodeSandbox(timeout=settings.SANDBOX_TIMEOUT)
         self.rag_tool = DocumentationSearchTool()
         self.kb_manager = KnowledgeBaseManager()
@@ -54,78 +58,105 @@ class CircuitWeaverOrchestrator:
 
     def run(self):
         try:
-            print(f"\n[Job {self.job_id}] --- STAGE 1: Generating circuit design concept ---")
-            circuit_idea = self._generate_circuit_idea()
+            # Stage 1: Constrained Ideation
+            print(f"\n[Job {self.job_id}] --- Stage 1: Generating Constrained Diagram Concept ---")
+            circuit_idea = self.planner_llm.invoke([HumanMessage(content=planner_prompts.GET_IDEA_PROMPT)]).content
             self._save_artifact("1_circuit_idea.txt", circuit_idea)
             
-            print(f"\n[Job {self.job_id}] --- STAGE 2: Code Generation and Refinement ---")
-            final_code = self._generation_and_refinement_workflow(circuit_idea)
+            # Stage 2: Structural Modeling
+            print(f"\n[Job {self.job_id}] --- Stage 2: Creating Structural JSON Blueprint ---")
+            json_blueprint = self._create_json_blueprint(circuit_idea)
+            if not json_blueprint: return
+
+            # Stage 3: Code Generation and Refinement
+            print(f"\n[Job {self.job_id}] --- Stage 3: Code Generation and Refinement ---")
+            final_code = self._generation_and_refinement_workflow(circuit_idea, json_blueprint)
             
             if final_code:
-                print(f"\n✅ [Job {self.job_id}] Agent successfully generated a visually and functionally valid script.")
-                self._save_artifact("final_successful_code.py", final_code)
-
-                final_run_dir = os.path.join(self.results_dir, "final_run")
-                success, _ = self.sandbox.run(final_code, final_run_dir)
-                if success:
-                    final_svg_path = os.path.join(final_run_dir, "circuit_diagram.svg")
-                    if os.path.exists(final_svg_path):
-                        shutil.copy(final_svg_path, os.path.join(self.results_dir, "final_successful_diagram.svg"))
-                        print(f"🖼️  Copied final diagram to root directory.")
-                
-                self.success_code_manager.add_success(final_code, circuit_idea)
+                self._finalize_and_save(final_code, circuit_idea)
             else:
-                print(f"\n❌ [Job {self.job_id}] Agent failed to produce a valid script after all attempts. Orchestration stopped.")
+                print(f"\n❌ [Job {self.job_id}] Agent failed to produce a valid script. Orchestration stopped.")
 
         except Exception as e:
-            print(f"\n🚨 [Job {self.job_id}] An unexpected error occurred in the orchestrator: {e}")
+            print(f"\n🚨 [Job {self.job_id}] An unexpected error occurred: {e}")
             traceback.print_exc()
         finally:
             print(f"\n--- [Job {self.job_id}] Orchestration Complete ---")
-            print(f"All artifacts for Job {self.job_id} saved in: {self.results_dir}")
+            print(f"All artifacts saved in: {self.results_dir}")
 
-    def _generation_and_refinement_workflow(self, circuit_idea: str) -> str | None:
-        initial_code = self._generate_initial_code(circuit_idea)
+    def _create_json_blueprint(self, circuit_idea: str) -> dict | None:
+        reference_examples = self.success_code_manager.retrieve_successes(circuit_idea, k=settings.SUCCESS_CODE_RAG_K)
+        prompt = architect_prompts.GENERATE_JSON_BLUEPRINT_PROMPT.format(
+            circuit_idea=circuit_idea,
+            reference_examples_code=reference_examples
+        )
+        try:
+            response = self.architect_llm.invoke([HumanMessage(content=prompt)]).content
+            blueprint = json.loads(response)
+            self._save_artifact("2_json_blueprint.json", json.dumps(blueprint, indent=2))
+            # Basic validation
+            if "components" in blueprint and "connections" in blueprint:
+                print("✅ JSON blueprint created successfully.")
+                return blueprint
+            else:
+                raise ValueError("JSON blueprint missing required keys.")
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"🔴 Failed to create a valid JSON blueprint: {e}")
+            self._save_artifact("2_json_blueprint_error.txt", response)
+            return None
+
+    def _generation_and_refinement_workflow(self, circuit_idea: str, json_blueprint: dict) -> str | None:
+        initial_code = self._generate_initial_code(circuit_idea, json_blueprint)
         if not initial_code: return None
 
         runnable_code = self._runtime_debugging_loop(initial_code, circuit_idea)
         if not runnable_code:
-            print(f"❌ [Job {self.job_id}] Failed to produce a runnable script in the Runtime Debugging Workshop.")
+            print(f"❌ Failed to produce a runnable script in the Runtime Debugging Workshop.")
             return None
         
-        print(f"✅ [Job {self.job_id}] Exited Runtime Workshop. Code is now runnable.")
+        print(f"✅ Exited Runtime Workshop. Code is now runnable.")
         self._save_artifact("4_runnable_code.py", runnable_code)
 
         polished_code = self._layout_polishing_loop(runnable_code)
         if not polished_code:
-            print(f"🟡 [Job {self.job_id}] Failed to polish layout. Returning the last runnable version.")
+            print(f"🟡 Failed to polish layout. Returning the last runnable version.")
             return runnable_code
         
-        print(f"✅ [Job {self.job_id}] Exited Layout Workshop. Code has been polished.")
+        print(f"✅ Exited Layout Workshop. Code has been polished.")
         return polished_code
 
-    def _generate_initial_code(self, circuit_idea: str) -> str | None:
-        print(f"\n[Job {self.job_id}] --- Step 2.1: Initial Code Generation ---")
-        retrieved_examples = self.example_retriever.forward(circuit_idea, k=settings.EXAMPLE_RAG_K)
-        reference_codes = "\n\n---\n\n".join([ex['code'] for ex in retrieved_examples])
-
-        planning_prompt = coder_prompts.PLANNING_PROMPT.format(circuit_idea=circuit_idea, reference_examples_code=reference_codes)
-        execution_plan = self.planner_llm.invoke([HumanMessage(content=planning_prompt)]).content
-        self._save_artifact("2_execution_plan.md", execution_plan)
+    def _generate_initial_code(self, circuit_idea: str, json_blueprint: dict) -> str | None:
+        print(f"--- Step 3.1: Generating Code from Blueprint (Multi-Modal) ---")
+        retrieved_examples = self.success_code_manager.retrieve_successes_as_docs(circuit_idea, k=settings.EXAMPLE_RAG_K)
         
-        codegen_prompt = coder_prompts.CODEGEN_FROM_PLAN_PROMPT.format(circuit_idea=circuit_idea, execution_plan=execution_plan)
+        # We now use a different coder prompt that takes the JSON blueprint
+        codegen_prompt = coder_prompts.CODEGEN_FROM_BLUEPRINT_PROMPT.format(
+            circuit_idea=circuit_idea,
+            json_blueprint=json.dumps(json_blueprint, indent=2)
+        )
         codegen_message_content = [{"type": "text", "text": codegen_prompt}]
-        for example in retrieved_examples:
-            if example.get('image_path'):
-                full_image_path = os.path.join(settings.PROCESSED_CIRCUITS_DIR, example['image_path'])
-                b64_image = resize_and_encode_image(full_image_path, settings.MAX_IMAGE_DIMENSION)
-                if b64_image:
-                    codegen_message_content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_image}"}})
+        for example_doc in retrieved_examples:
+            # Assuming you've seeded your successful_circuits with images now
+            # This part is a placeholder for that logic. If no images, it does nothing.
+            pass
         
         response = self.coder_llm.invoke([HumanMessage(content=codegen_message_content)])
         code = self._extract_python_code(response.content)
         self._save_artifact("3_initial_generated_code.py", code)
         return code if code else None
+        
+    def _finalize_and_save(self, final_code, circuit_idea):
+        print(f"\n✅ Agent successfully generated a visually and functionally valid script.")
+        self._save_artifact("final_successful_code.py", final_code)
+        final_run_dir = os.path.join(self.results_dir, "final_run")
+        success, _ = self.sandbox.run(final_code, final_run_dir)
+        if success:
+            final_svg_path = os.path.join(final_run_dir, "circuit_diagram.svg")
+            if os.path.exists(final_svg_path):
+                shutil.copy(final_svg_path, os.path.join(self.results_dir, "final_successful_diagram.svg"))
+                print(f"🖼️  Copied final diagram to root directory.")
+        self.success_code_manager.add_success(final_code, circuit_idea)
+
 
     def _runtime_debugging_loop(self, code_to_debug: str, circuit_idea: str) -> str | None:
         print(f"\n[Job {self.job_id}] --- Entering Runtime Debugging Workshop ---")

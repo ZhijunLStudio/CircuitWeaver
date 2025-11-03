@@ -8,10 +8,9 @@ from langchain_community.docstore.document import Document
 from configs import settings
 import faiss
 
-# <<< 核心修正：导入 getter 函数 >>>
 from src.tools.documentation_search_tool import get_embedding_model
 
-# --- 全局单例 ---
+# --- Global Singleton ---
 success_code_manager_instance = None
 
 class SuccessCodeManager:
@@ -29,7 +28,7 @@ class SuccessCodeManager:
         self._load_or_initialize()
     
     def _load_or_initialize(self):
-        if os.path.exists(self.vector_db_path):
+        if os.path.exists(self.vector_db_path) and os.path.exists(self.metadata_path):
             try:
                 print("🧠 Loading existing success code vector store...")
                 self.vector_store = FAISS.load_local(self.vector_db_path, self.embedding_model, allow_dangerous_deserialization=True)
@@ -70,6 +69,7 @@ class SuccessCodeManager:
         print(f"✅ Successfully added new code to success repo: {filename}")
 
     def retrieve_successes(self, query_idea: str, k: int) -> str:
+        """Retrieves relevant examples and formats them as a single string for prompts."""
         if k == 0 or not hasattr(self.vector_store.index, 'ntotal') or self.vector_store.index.ntotal == 0:
             return "No successful examples found in the repository."
 
@@ -98,15 +98,25 @@ class SuccessCodeManager:
         except Exception as e:
             print(f"Error during success code retrieval: {e}")
             return "An error occurred while retrieving successful examples."
+    
+    # <<< THIS IS THE NEW, MISSING METHOD >>>
+    def retrieve_successes_as_docs(self, query_idea: str, k: int) -> list[Document]:
+        """Retrieves relevant examples and returns them as a list of Document objects."""
+        if k == 0 or not hasattr(self.vector_store.index, 'ntotal') or self.vector_store.index.ntotal == 0:
+            return []
+        
+        try:
+            return self.vector_store.similarity_search(query_idea, k=k)
+        except Exception as e:
+            print(f"Error during success code document retrieval: {e}")
+            return []
 
+# --- Singleton Initializer ---
 def init_success_code_manager():
     global success_code_manager_instance
     if success_code_manager_instance is None:
         print("--- 🏭 Initializing Shared SuccessCodeManager (ONCE) ---")
-        
-        # <<< 核心修正：调用 getter 来安全地获取模型 >>>
         embedding_model = get_embedding_model()
-        
         success_code_manager_instance = SuccessCodeManager(embedding_model=embedding_model)
         print("--- 🏭 Shared SuccessCodeManager Initialized ---")
 
